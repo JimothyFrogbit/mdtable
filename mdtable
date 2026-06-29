@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""mdtable — Format ragged markdown tables into neat aligned columns.
+
+Usage:
+    mdtable README.md          # Fix tables in-place (with --check for dry-run)
+    mdtable < README.md        # Read from stdin, print to stdout
+    cat doc.md | mdtable       # Pipe mode
+    mdtable --help             # Show this message
+"""
+
+import sys, re, os
+
+def parse_table(lines, start):
+    """Parse a markdown table starting at `start` in `lines`.
+    Returns (header, separator, rows, end_index) or None.
+    """
+    if not lines[start].strip().startswith('|'):
+        return None
+    
+    header = lines[start].rstrip()
+    if start + 1 >= len(lines):
+        return None
+    
+    sep = lines[start + 1].rstrip()
+    # The separator row must contain only |, -, :, and spaces
+    sep_content = sep.strip().strip('|').strip()
+    if not re.match(r'^[\s\-:|]+$', sep_content):
+        return None
+    
+    rows = []
+    end = start + 2
+    while end < len(lines):
+        line = lines[end].rstrip()
+        if not line.strip().startswith('|'):
+            break
+        rows.append(line)
+        end += 1
+    
+    return (header, sep, rows, end)
+
+
+def parse_cells(row):
+    """Split a table row into individual cells."""
+    # Strip outer pipes, then split on inner pipes
+    content = row.strip()
+    if content.startswith('|'):
+        content = content[1:]
+    if content.endswith('|'):
+        content = content[:-1]
+    # Split on | but preserve escaped pipes
+    cells = []
+    current = ''
+    for char in content:
+        if char == '|':
+            cells.append(current.strip())
+            current = ''
+        else:
+            current += char
+    cells.append(current.strip())
+    return cells
+
+
+def parse_alignment(sep):
+    """Parse alignment from separator row. Returns list of alignments."""
+    cells = parse_cells(sep)
+    alignments = []
+    for cell in cells:
+        cell = cell.strip()
+        if cell.startswith(':') and cell.endswith(':'):
+            alignments.append('center')
+        elif cell.endswith(':'):
+            alignments.append('right')
+        else:
+            alignments.append('left')
+    return alignments
+
+
+def format_separator(widths, alignments):
+    """Build a formatted separator row."""
+    parts = []
+    for w, a in zip(widths, alignments):
+        # width + 2 accounts for mandatory space padding in data rows
+        dashes = '-' * max(3, w + 2)
+        if a == 'center':
+            parts.append(f':{dashes[1:-1]}:')
+        elif a == 'right':
+            parts.append(f'{dashes[:-1]}:')
+        else:
+            parts.append(dashes)
+    return '|' + '|'.join(parts) + '|'
+
+
+def format_row(cells, widths, alignments):
+    """Format a data row with proper padding."""
+    parts = []
+    for cell, w, a in zip(cells, widths, alignments):
+        if a == 'right':
+            parts.append(cell.rjust(w))
+        elif a == 'center':
+            left = (w - len(cell)) // 2
+            right = w - len(cell) - left
+            parts.append(' ' * left + cell + ' ' * right)
+        else:
+            parts.append(cell.ljust(w))
+    return '| ' + ' | '.join(parts) + ' |'
+
+
+def format_table(header, sep, rows):
+    """Reformat an entire markdown table."""
+    header_cells = parse_cells(header)
+    alignments = parse_alignment(sep)
+    
+    all_rows = [header_cells]
+    for row in rows:
+        all_rows.append(parse_cells(row))
+    
+    # Calculate max widths
+    ncols = max(len(r) for r in all_rows)
+    widths = [0] * ncols
+    alignments = alignments[:ncols] if len(alignments) >= ncols else alignments + ['left'] * (ncols - len(alignments))
+    
+    for row in all_rows:
+        for i, cell in enumerate(row):
+            if i < ncols:
+                widths[i] = max(widths[i], len(cell))
+    
+    # Ensure min width for separator
+    widths = [max(w, 3) for w in widths]
+    
+    # Build output
+    out = [format_row(header_cells, widths, alignments)]
+    out.append(format_separator(widths, alignments))
+    for row in rows:
+        cells = parse_cells(row)
+        # Pad cells to match column count
+        cells = cells[:ncols] + [''] * (ncols - len(cells))
+        out.append(format_row(cells, widths, alignments))
+    
+    return out
+
+
+def process_markdown(text):
+    """Process markdown text, formatting all tables."""
+    lines = text.split('\n')
+    result = []
+    i = 0
+    changes = 0
+    
+    while i < len(lines):
+        table = parse_table(lines, i)
+        if table:
+            header, sep, rows, end = table
+            formatted = format_table(header, sep, rows)
+            result.extend(formatted)
+            changes += 1
+            i = end
+        else:
+            result.append(lines[i])
+            i += 1
+    
+    return '\n'.join(result), changes
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] in ('-h', '--help'):
+        print(__doc__.strip())
+        return
+    
+    if args[0] == '--check':
+        check_mode = True
+        files = args[1:]
+    else:
+        check_mode = False
+        files = args
+    
+    if not files:
+        # Read from stdin
+        text = sys.stdin.read()
+        result, changes = process_markdown(text)
+        if check_mode:
+            if changes > 0:
+                print(f"stdin: {changes} table(s) need formatting", file=sys.stderr)
+            sys.exit(0 if changes == 0 else 1)
+        print(result, end='')
+        return
+    
+    for path in files:
+        if not os.path.exists(path):
+            print(f"mdtable: file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        
+        with open(path, 'r') as f:
+            text = f.read()
+        
+        result, changes = process_markdown(text)
+        
+        if check_mode:
+            if changes > 0:
+                print(f"{path}: {changes} table(s) need formatting")
+                sys.exit(1)
+        else:
+            if changes > 0:
+                with open(path, 'w') as f:
+                    f.write(result)
+                print(f"{path}: {changes} table(s) formatted")
+            else:
+                print(f"{path}: no tables to format")
+
+
+if __name__ == '__main__':
+    main()
