@@ -4,10 +4,14 @@
 Usage:
     mdtable README.md                    # Fix tables in-place (default)
     mdtable --stdout README.md           # Print formatted tables to stdout
-    mdtable < README.md                  # Read from stdin, print to stdout
-    cat doc.md | mdtable                 # Pipe mode (same as above)
+    cat doc.md | mdtable                 # Pipe mode — auto-detected
+    mdtable < README.md                  # Stdin redirect — also auto-detected
     mdtable --format json < table.md     # JSON as output (machine-readable)
+    mdtable --format csv < table.md      # CSV output (machine-readable)
     mdtable --format json README.md      # JSON for files too
+    mdtable --format csv README.md       # CSV for files too
+    mdtable --format csv --no-headers < t  # CSV without header row
+    mdtable --format csv --csv-delimiter '|' < t  # Pipe-delimited output
     mdtable --check <file>               # Dry-run: exit 1 if tables need formatting
     mdtable --check < doc.md             # Check on stdin
     mdtable --version                    # Show version
@@ -17,9 +21,10 @@ Usage:
 import sys
 import re
 import os
+import stat
 import json
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 
 def parse_cells(row):
@@ -176,6 +181,50 @@ def format_all_tables_as_json(text):
     return json.dumps(tables, indent=2)
 
 
+def format_table_csv(header, sep, rows, delimiter=',', no_headers=False):
+    """Format a table as CSV lines.
+
+    Returns a list of CSV-formatted strings (header + data rows).
+    Cells with commas, quotes, or newlines are properly quoted.
+    """
+    def escape_cell(cell):
+        if delimiter in cell or '"' in cell or '\n' in cell or '\r' in cell:
+            return '"' + cell.replace('"', '""') + '"'
+        return cell
+
+    header_cells = parse_cells(header)
+    lines_out = []
+    if not no_headers:
+        lines_out.append(delimiter.join(escape_cell(c) for c in header_cells))
+    for row in rows:
+        cells = parse_cells(row)
+        while len(cells) < len(header_cells):
+            cells.append('')
+        cells = cells[:len(header_cells)]
+        lines_out.append(delimiter.join(escape_cell(c) for c in cells))
+    return lines_out
+
+
+def format_all_tables_as_csv(text, delimiter=',', no_headers=False):
+    """Parse all tables in markdown text and return them as CSV blocks.
+
+    Each table becomes a block of CSV lines, separated by a blank line.
+    Returns a string.
+    """
+    lines = text.split('\n')
+    blocks = []
+    i = 0
+    while i < len(lines):
+        table = parse_table(lines, i)
+        if table:
+            header, sep, rows, end = table
+            blocks.append('\n'.join(format_table_csv(header, sep, rows, delimiter, no_headers)))
+            i = end
+        else:
+            i += 1
+    return '\n\n'.join(blocks) + '\n'
+
+
 def format_table(header, sep, rows):
     """Reformat an entire markdown table."""
     header_cells = parse_cells(header)
@@ -253,8 +302,11 @@ def main():
         return
 
     # Parse --format flag
+    csv_mode = False
     json_mode = False
     stdout_mode = False
+    no_headers = False
+    csv_delimiter = ','
     filtered = []
     i = 0
     while i < len(args):
@@ -262,14 +314,24 @@ def main():
             fmt = args[i + 1]
             if fmt == 'json':
                 json_mode = True
+            elif fmt == 'csv':
+                csv_mode = True
             else:
-                print(f"mdtable: unknown format '{fmt}' (use 'json')", file=sys.stderr)
+                print(f"mdtable: unknown format '{fmt}' (use 'json' or 'csv')", file=sys.stderr)
                 sys.exit(1)
             i += 2
             continue
         elif args[i] == '--stdout':
             stdout_mode = True
             i += 1
+            continue
+        elif args[i] == '--no-headers':
+            no_headers = True
+            i += 1
+            continue
+        elif args[i] == '--csv-delimiter' and i + 1 < len(args):
+            csv_delimiter = args[i + 1]
+            i += 2
             continue
         else:
             filtered.append(args[i])
@@ -284,12 +346,27 @@ def main():
         check_mode = False
         files = args
 
-    if not files:
-        # No file arguments — read from stdin
+    # Detect pipe mode: stdin connected to a pipe (not a terminal)
+    stdin_pipe = False
+    try:
+        stdin_pipe = stat.S_ISFIFO(os.fstat(0).st_mode)
+    except (OSError, AttributeError):
+        pass
+
+    if stdin_pipe:
+        # Pipe mode — read from stdin even if file arguments given
         text = sys.stdin.read()
+
+        if files:
+            print(f"stdin: reading from pipe (ignoring {len(files)} file argument(s))",
+                  file=sys.stderr)
 
         if json_mode:
             print(format_all_tables_as_json(text))
+            return
+
+        if csv_mode:
+            print(format_all_tables_as_csv(text, delimiter=csv_delimiter, no_headers=no_headers), end='')
             return
 
         result, changes = process_markdown(text)
@@ -299,6 +376,11 @@ def main():
             sys.exit(0 if changes == 0 else 1)
         sys.stdout.write(result)
         return
+
+    # No pipe — fall back to file mode
+    if not files:
+        print("mdtable: no input — pipe data or provide a filename", file=sys.stderr)
+        sys.exit(1)
 
     # File mode
     exit_code = 0
@@ -312,6 +394,10 @@ def main():
 
         if json_mode:
             print(format_all_tables_as_json(text))
+            continue
+
+        if csv_mode:
+            print(format_all_tables_as_csv(text, delimiter=csv_delimiter, no_headers=no_headers), end='')
             continue
 
         result, changes = process_markdown(text)

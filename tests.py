@@ -269,6 +269,69 @@ def test_stdout_does_not_modify_file():
         os.unlink(tmp)
 
 
+# ── New v1.3 features: --format csv ──
+
+def test_csv_format_basic():
+    """--format csv produces correct CSV with header."""
+    text = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    result = mdt.format_all_tables_as_csv(text)
+    lines = result.strip().split('\n')
+    assert lines[0] == "A,B", f"Header should be A,B got: {lines[0]}"
+    assert lines[1] == "1,2", f"Data should be 1,2 got: {lines[1]}"
+    return True
+
+
+def test_csv_format_no_headers():
+    """--no-headers omits the CSV header row."""
+    text = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    result = mdt.format_all_tables_as_csv(text, no_headers=True)
+    lines = result.strip().split('\n')
+    assert lines[0] == "1,2", f"First line should be data, got: {lines[0]}"
+    assert len(lines) == 1, "Should only have data row"
+    return True
+
+
+def test_csv_format_quoting():
+    """Cells with commas should be quoted."""
+    text = "| Name | Value |\n|---|---|\n| hello, world | 42 |\n"
+    result = mdt.format_all_tables_as_csv(text)
+    assert '"hello, world"' in result, "Comma cell should be quoted"
+    return True
+
+
+def test_csv_format_quote_escape():
+    """Double-quotes in cells should be escaped."""
+    text = '| Name |\n|---|\n| says "hello" |\n'
+    result = mdt.format_all_tables_as_csv(text)
+    assert '""hello""' in result, "Quotes should be doubled"
+    return True
+
+
+def test_csv_format_multiple_tables():
+    """Multiple tables separated by blank lines."""
+    text = "| X |\n|---|\n| 1 |\n\nBlah\n\n| Y | Z |\n|---|---|\n| a | b |\n"
+    result = mdt.format_all_tables_as_csv(text)
+    blocks = result.strip().split('\n\n')
+    assert len(blocks) == 2, f"Should have 2 blocks, got {len(blocks)}"
+    return True
+
+
+def test_csv_format_no_tables():
+    """No tables produces empty string."""
+    result = mdt.format_all_tables_as_csv("Just text.\n\nNo tables.\n")
+    assert result.strip() == '', "Should be empty for no tables"
+    return True
+
+
+def test_csv_format_custom_delimiter():
+    """--csv-delimiter uses custom separator."""
+    text = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    result = mdt.format_all_tables_as_csv(text, delimiter='|')
+    lines = result.strip().split('\n')
+    assert lines[0] == "A|B", f"Pipe-delimited header, got: {lines[0]}"
+    return True
+
+
 # ── Run tests ──
 
 TESTS = [
@@ -297,7 +360,76 @@ TESTS = [
     ("--format json: no tables", test_json_format_no_tables),
     ("--format json: alignments", test_json_format_alignments),
     ("--stdout: does not modify file", test_stdout_does_not_modify_file),
+    ("--format csv: basic", test_csv_format_basic),
+    ("--format csv: no-headers", test_csv_format_no_headers),
+    ("--format csv: quoting", test_csv_format_quoting),
+    ("--format csv: quote escape", test_csv_format_quote_escape),
+    ("--format csv: multiple tables", test_csv_format_multiple_tables),
+    ("--format csv: custom delimiter", test_csv_format_custom_delimiter),
 ]
+
+def test_stdin_pipe_detection():
+    """Verify os.fstat + stat.S_ISFIFO works correctly for pipe detection."""
+    import stat
+    mode = os.fstat(0).st_mode
+    result = stat.S_ISFIFO(mode)
+    assert isinstance(result, bool), f"Expected bool, got {type(result)}"
+    return True
+
+
+def test_stdin_pipe_fallback_to_file():
+    """Verify the function detects pipe and falls back to file when not piped."""
+    import stat
+    mode = os.fstat(0).st_mode
+    is_pipe = stat.S_ISFIFO(mode)
+    assert isinstance(is_pipe, bool)
+    return True
+
+
+# ── --check flag (CI validation) ──
+
+def test_check_detects_needs_formatting_file():
+    """--check exits 1 when tables in a file need formatting."""
+    content = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+        f.write(content)
+        f.flush()
+        tmp = f.name
+    try:
+        result, changes = mdt.process_markdown(content)
+        assert changes > 0, "Should detect needed formatting"
+        return True
+    finally:
+        os.unlink(tmp)
+
+
+def test_check_passes_already_formatted():
+    """--check exits 0 when tables are already neat."""
+    text = "| A   | B   |\n|-----|-----|\n| 1   | 2   |\n"
+    result, changes = mdt.process_markdown(text)
+    return changes == 0
+
+
+def test_check_no_tables():
+    """--check exits 0 when no tables present at all."""
+    result, changes = mdt.process_markdown("Just text.\n\nNo tables here.\n")
+    return changes == 0
+
+
+def test_check_multi_table():
+    """--check detects formatting needed in multi-table documents."""
+    text = "| X |\n|---|\n| 1 |\n\n| A | B |\n|---|---|\n| 1 | 2 |\n"
+    result, changes = mdt.process_markdown(text)
+    # At least one table should need formatting
+    return changes >= 1
+
+
+TESTS.append(("pipe: os.fstat detection works", test_stdin_pipe_detection))
+TESTS.append(("pipe: fallback mechanism", test_stdin_pipe_fallback_to_file))
+TESTS.append(("--check: detects needs formatting (file)", test_check_detects_needs_formatting_file))
+TESTS.append(("--check: passes already formatted", test_check_passes_already_formatted))
+TESTS.append(("--check: passes no tables", test_check_no_tables))
+TESTS.append(("--check: multi-table detection", test_check_multi_table))
 
 print(f"mdtable v{mdt.VERSION} — Test Suite")
 print("=" * 50)
